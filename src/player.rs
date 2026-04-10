@@ -69,7 +69,8 @@ pub fn render_section(pattern: &Pattern) -> Vec<f32> {
 // ── Play ──────────────────────────────────────────────────────────────────────
 
 pub fn play_pattern(pattern: &Pattern) -> Result<()> {
-    let stereo = generate_stereo(pattern);
+    let mut stereo = generate_stereo(pattern);
+    trim_trailing_silence(&mut stereo);
     let duration_secs = (stereo.len() / 2) as f32 / SAMPLE_RATE as f32;
     println!(
         "  {:<12}  {} bars · {} BPM · {:.1}s · {} events",
@@ -161,7 +162,8 @@ fn play_wav_bytes(wav: &[u8], player: &str) -> Result<()> {
 // ── WAV rendering ─────────────────────────────────────────────────────────────
 
 fn render_wav(pattern: &Pattern) -> Vec<u8> {
-    let stereo = generate_stereo(pattern);
+    let mut stereo = generate_stereo(pattern);
+    trim_trailing_silence(&mut stereo);
     let i16_samples: Vec<i16> = stereo
         .iter()
         .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
@@ -273,9 +275,7 @@ fn generate_stereo(pattern: &Pattern) -> Vec<f32> {
         right[right_len - 1 - i] *= t;
     }
 
-    let mut stereo: Vec<f32> = left.iter().zip(right.iter()).flat_map(|(&l, &r)| [l, r]).collect();
-    trim_trailing_silence(&mut stereo);
-    stereo
+    left.iter().zip(right.iter()).flat_map(|(&l, &r)| [l, r]).collect()
 }
 
 /// Trim trailing silence from stereo-interleaved samples.

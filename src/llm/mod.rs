@@ -146,10 +146,10 @@ pub struct SectionPlan {
 pub fn plan_song(target_secs: u32, bpm_hint: f32) -> Vec<SectionPlan> {
     let bar_secs = (60.0 / bpm_hint) * 4.0;
 
-    // Aim for sections of ~28 s each; clamp total section count to 5–12
-    let n = ((target_secs as f32 / 28.0).round() as usize).clamp(5, 12);
+    // Scale section count to song length: ~15s per section, minimum 3
+    let n = ((target_secs as f32 / 15.0).round() as usize).clamp(3, 12);
 
-    // Bars per section: round to nearest 4-bar phrase, cap at 16 for LLM token budget
+    // Bars per section: distribute evenly, round to nearest 4-bar phrase
     let raw = (target_secs as f32 / n as f32 / bar_secs).round() as u32;
     let section_bars = ((raw + 2) / 4 * 4).clamp(4, 16);
 

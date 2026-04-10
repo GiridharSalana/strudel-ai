@@ -104,19 +104,40 @@ pub fn parse_duration_secs(s: &str) -> Option<u32> {
     }
 }
 
-/// Scan prompt text for natural-language duration hints: "5 min", "3 minutes".
+/// Scan prompt text for natural-language duration hints.
+/// Handles: "5 min", "3 minutes", "1min", "2m", "30s", "1.5 hours", "2:30"
 pub fn extract_duration_from_prompt(prompt: &str) -> Option<u32> {
     let words: Vec<&str> = prompt.split_whitespace().collect();
+
     for (i, word) in words.iter().enumerate() {
-        let n: f32 = match word.parse() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if let Some(unit) = words.get(i + 1) {
-            let unit = unit.to_lowercase();
-            if unit.starts_with("min") { return Some((n * 60.0) as u32); }
-            if unit.starts_with("sec") { return Some(n as u32); }
-            if unit.starts_with("hour") || unit.starts_with("hr") { return Some((n * 3600.0) as u32); }
+        // Try "5 min" / "3 minutes" / "1 hour" (number + separate unit)
+        if let Ok(n) = word.parse::<f32>() {
+            if let Some(unit) = words.get(i + 1) {
+                let unit = unit.to_lowercase();
+                if unit.starts_with("min") { return Some((n * 60.0) as u32); }
+                if unit.starts_with("sec") { return Some(n as u32); }
+                if unit.starts_with("hour") || unit.starts_with("hr") { return Some((n * 3600.0) as u32); }
+            }
+        }
+
+        // Try "1min", "2m", "30s", "1.5hr" (number+unit glued together)
+        let w = word.to_lowercase();
+        if let Some(pos) = w.find(|c: char| c.is_alphabetic()) {
+            if let Ok(n) = w[..pos].parse::<f32>() {
+                let unit = &w[pos..];
+                if unit.starts_with("min") || unit == "m" { return Some((n * 60.0) as u32); }
+                if unit.starts_with("sec") || unit == "s" { return Some(n as u32); }
+                if unit.starts_with("hour") || unit.starts_with("hr") || unit == "h" {
+                    return Some((n * 3600.0) as u32);
+                }
+            }
+        }
+
+        // Try "2:30" inline
+        if let Some((mins, secs)) = word.split_once(':') {
+            if let (Ok(m), Ok(s)) = (mins.parse::<u32>(), secs.parse::<u32>()) {
+                return Some(m * 60 + s);
+            }
         }
     }
     None
