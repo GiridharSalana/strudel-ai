@@ -63,15 +63,18 @@ pub fn play_pattern(pattern: &Pattern) -> Result<()> {
     let loop_secs = (pattern.bars as f32 * 4.0 * 60.0) / pattern.bpm;
 
     println!(
-        "  {} {} bars · {} BPM · {} events · {:.1}s × {} loops",
-        "♪".cyan().bold(),
+        "  {:<12}  {} bars · {} BPM · {} events",
+        "synthesizing".truecolor(100, 100, 140),
         pattern.bars,
         pattern.bpm as u32,
         pattern.events.len(),
+    );
+    println!(
+        "  {:<12}  {:.1}s × {} loops",
+        "",
         loop_secs,
         LOOP_COUNT,
     );
-    println!("  {} {}", "Stop:".dimmed(), "Ctrl+C".bold());
     println!();
 
     let player = detect_player()?;
@@ -144,13 +147,12 @@ pub fn play_song(
 
     let actual_secs = timeline.len() as f32 / SAMPLE_RATE as f32;
     println!(
-        "  {} {:.0}:{:02.0} of audio · {} sections",
-        "♪".cyan().bold(),
+        "  {:<12}  {:.0}:{:02.0} · {} sections",
+        "synthesizing".truecolor(100, 100, 140),
         (actual_secs / 60.0).floor(),
         actual_secs % 60.0,
         arrangement.len(),
     );
-    println!("  {} {}", "Stop:".dimmed(), "Ctrl+C".bold());
     println!();
 
     let player = detect_player()?;

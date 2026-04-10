@@ -1,11 +1,11 @@
 [package]
-name = "strudel-ai"
+name = "giribeat"
 version = "0.1.0"
 edition = "2021"
-description = "AI-powered CLI music generator using Cerebras or Cohere LLMs"
+description = "AI-powered CLI music composer — describe music in plain English, hear it play"
 
 [[bin]]
-name = "Strudel-Ai"
+name = "giribeat"
 path = "src/main.rs"
 
 [dependencies]
