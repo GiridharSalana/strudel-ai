@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use fundsp::prelude::*;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -37,8 +38,13 @@ fn default_gain() -> f32 {
 }
 
 pub fn parse_pattern(json: &str) -> Result<Pattern> {
-    serde_json::from_str(json)
-        .context("Failed to parse music pattern — LLM may have returned malformed JSON")
+    // Parse to Value first — this tolerates duplicate keys (keeps last value).
+    // Then re-serialize to a clean string before deserializing into Pattern.
+    let val: serde_json::Value = serde_json::from_str(json)
+        .context("Failed to parse music pattern — LLM may have returned malformed JSON")?;
+    let clean = serde_json::to_string(&val).context("Failed to re-serialize pattern")?;
+    serde_json::from_str(&clean)
+        .context("Failed to deserialize pattern from cleaned JSON")
 }
 
 pub fn save_wav_file(pattern: &Pattern, path: &Path) -> Result<()> {
@@ -73,6 +79,82 @@ pub fn play_pattern(pattern: &Pattern) -> Result<()> {
         play_wav_bytes(&wav, &player)?;
     }
     Ok(())
+}
+
+/// Play a full multi-section song. Sections are rendered, arranged, crossfaded,
+/// and played as a single continuous audio stream.
+pub fn play_song(
+    sections: &HashMap<String, Pattern>,
+    arrangement: &[String],
+    target_secs: u32,
+) -> Result<()> {
+    // Render each unique section to a mono buffer
+    let mut rendered: HashMap<String, Vec<f32>> = HashMap::new();
+    for (name, pattern) in sections {
+        rendered.insert(name.clone(), generate_mono(pattern));
+    }
+
+    // Concatenate in arrangement order with a short crossfade between sections
+    let xfade = (0.025 * SAMPLE_RATE as f32) as usize; // 25ms crossfade
+    let mut timeline: Vec<f32> = Vec::new();
+
+    for section_name in arrangement {
+        let buf = match rendered.get(section_name) {
+            Some(b) => b,
+            None => {
+                eprintln!("Warning: section '{}' not found, skipping", section_name);
+                continue;
+            }
+        };
+
+        if timeline.is_empty() {
+            timeline.extend_from_slice(buf);
+        } else {
+            let overlap = std::cmp::min(xfade, std::cmp::min(buf.len(), timeline.len()));
+            let start   = timeline.len() - overlap;
+            // Blend end of previous section with start of next
+            for i in 0..overlap {
+                let t = i as f32 / overlap as f32;
+                timeline[start + i] = timeline[start + i] * (1.0 - t) + buf[i] * t;
+            }
+            timeline.extend_from_slice(&buf[overlap..]);
+        }
+    }
+
+    // Trim to target duration
+    let max_samples = (target_secs as f32 * SAMPLE_RATE as f32) as usize;
+    timeline.truncate(max_samples);
+
+    // Final normalize
+    let peak = timeline.iter().cloned().fold(0.0f32, |a, b| a.abs().max(b.abs()));
+    if peak > 0.85 {
+        let scale = 0.85 / peak;
+        timeline.iter_mut().for_each(|s| *s *= scale);
+    }
+
+    // Stereo encode
+    let stereo: Vec<i16> = timeline
+        .iter()
+        .flat_map(|&s| {
+            let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            [v, v]
+        })
+        .collect();
+    let wav = encode_wav(&stereo);
+
+    let actual_secs = timeline.len() as f32 / SAMPLE_RATE as f32;
+    println!(
+        "  {} {:.0}:{:02.0} of audio · {} sections",
+        "♪".cyan().bold(),
+        (actual_secs / 60.0).floor(),
+        actual_secs % 60.0,
+        arrangement.len(),
+    );
+    println!("  {} {}", "Stop:".dimmed(), "Ctrl+C".bold());
+    println!();
+
+    let player = detect_player()?;
+    play_wav_bytes(&wav, &player)
 }
 
 fn detect_player() -> Result<String> {
