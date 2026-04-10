@@ -3,45 +3,94 @@ pub mod cohere;
 
 // ── Base JSON format used by every section call ───────────────────────────────
 
-pub const FORMAT_RULES: &str = r#"Output a JSON object with this exact schema — no markdown fences, no extra text:
+pub const FORMAT_RULES: &str = r#"You are both composer AND sound engineer. Every musical and sonic parameter is yours to decide.
+
+Output ONLY a JSON object — no markdown fences, no extra text:
 {
   "bpm": <integer 60-160>,
   "bars": <integer>,
+  "reverb": <0.0-1.0>,
   "events": [
-    {"t": <beat float>, "dur": <beat float>, "note": "<pitch or drum>", "wave": "<waveform>", "gain": <0.1-0.9>}
+    {
+      "t": <beat>,   "dur": <beat>,   "note": "<pitch or drum>",
+      "wave": "<waveform>",
+      "gain": <0.1-0.9>,
+      "pan": <-1.0 to 1.0>,
+      "attack": <seconds>,
+      "release": <seconds>
+    }
   ]
 }
 
-TIMING: 4/4 time. t=0 is bar 1 beat 1; t=4 is bar 2 beat 1. Beat = 1 unit.
-NOTES: "C2"–"B5" (e.g. "C4", "Eb3", "F#5"). Bass in octaves 2–3, melody in 4–5.
-DRUMS: "kick" (beats 1,3), "snare" (beats 2,4), "hat" (subdivisions), "clap"
-WAVE (melodic only): "sine", "triangle", "square", "sawtooth"
-GAIN: kick=0.85, snare=0.70, hat=0.45, melody=0.50, bass=0.60, pad=0.35
-IMPORTANT: Generate a rich arrangement that fills ALL requested bars with varied events.
-Return ONLY the JSON object."#;
+━━ TIMING ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4/4 time. t=0 = bar 1 beat 1.  t=4 = bar 2 beat 1.  Beat = 1 unit.
+Fill ALL requested bars with events that span the full duration.
+
+━━ NOTES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Pitches: "C2"–"B5"  (e.g. "C4", "Eb3", "F#5", "Bb4")
+Bass lines: octaves 2–3 · Melody / lead: 4–5 · Pads: 3–4
+
+━━ DRUMS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"kick"   — thump on beats 1, 3
+"snare"  — crack on beats 2, 4
+"hat"    — hi-hat subdivisions (8ths, 16ths)
+"clap"   — accent (can double the snare or offbeat)
+"openhat"— open hi-hat for longer sustain
+
+━━ WAVE (melodic only) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"sine"      smooth, pure, warm
+"triangle"  softer version of square, gentle
+"square"    hollow, woody, lo-fi organ
+"sawtooth"  bright, buzzy, classic synth lead/bass
+
+━━ GAIN ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Kick 0.80–0.90 · Snare 0.65–0.75 · Hat 0.35–0.50 · Clap 0.60–0.70
+Bass 0.55–0.70 · Lead melody 0.45–0.60 · Pad/chord 0.25–0.40
+
+━━ PAN ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+-1.0 hard-left · 0.0 center · 1.0 hard-right
+Kick, bass, snare → center (0.0)
+Hi-hat → slight right (0.3–0.5)
+Clap → slight left (-0.2)
+Lead melody → slight left or right (-0.3 to 0.3)
+Pad chord voices → spread wide (e.g. -0.6 and +0.6)
+
+━━ ATTACK & RELEASE (melodic only, in seconds) ━━━━━━━━━━━━
+attack:  0.001 pluck · 0.01 normal · 0.05–0.2 pad swell
+release: 0.05 staccato · 0.15 normal · 0.4–1.0 sustained/pad
+
+━━ REVERB (whole pattern) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+0.0 completely dry · 0.15 small room · 0.3 medium hall
+0.5 large hall · 0.7 cathedral · 0.9 huge ambient wash
+(applied to melodic layer only; drums stay dry)"#;
 
 // ── Single-pattern prompt (loop mode) ────────────────────────────────────────
 
-pub const STRUDEL_SYSTEM_PROMPT: &str = r#"You are a music composer for a CLI audio synthesizer. Generate a complete, self-contained musical piece.
-Create a rich, layered arrangement with bass + melody + drums. Use 8–16 bars to give it musical shape.
+pub const STRUDEL_SYSTEM_PROMPT: &str = r#"You are composer AND sound engineer. Generate a complete, self-contained musical piece for a CLI synthesizer.
+Use 8–16 bars. The piece plays exactly once — make it feel complete with a beginning, development, and resolution.
+Layer bass + melody + drums, and use panning, reverb, and ADSR to shape a professional mix.
 
-ARRANGEMENT: kick on beats 1,3 · snare on beats 2,4 · hi-hat subdivisions · bass line · melodic phrases · optional pads.
-The piece should feel complete on a single play — no looping. Let the melody develop and resolve within the bars.
-
-Output a JSON object with this exact schema — no markdown fences, no extra text:
+Output ONLY a JSON object — no markdown fences, no extra text. Use the full schema:
 {
   "bpm": <integer 60-160>,
   "bars": <integer 8-16>,
+  "reverb": <0.0-1.0>,
   "events": [
-    {"t": <beat float>, "dur": <beat float>, "note": "<pitch or drum>", "wave": "<waveform>", "gain": <0.1-0.9>}
+    {
+      "t": <beat>, "dur": <beat>, "note": "<pitch or drum>",
+      "wave": "<waveform>", "gain": <0.1-0.9>,
+      "pan": <-1.0 to 1.0>, "attack": <seconds>, "release": <seconds>
+    }
   ]
 }
 
-TIMING: 4/4 time. t=0 = bar 1 beat 1; t=4 = bar 2 beat 1.
-NOTES: "C2"–"B5". Bass: octaves 2–3. Melody: 4–5.
-DRUMS: "kick", "snare", "hat", "clap"
-WAVE: "sine", "triangle", "square", "sawtooth"
-Return ONLY the JSON object."#;
+NOTES: "C2"–"B5". Bass octaves 2–3. Melody 4–5.
+DRUMS: "kick" (beats 1,3)  "snare" (2,4)  "hat" (subdivisions)  "clap"  "openhat"
+WAVE: "sine" "triangle" "square" "sawtooth"
+PAN: kick/bass/snare=0.0 · hat=0.3–0.5 · melody spread -0.3 to 0.3 · pads wide ±0.6
+ATTACK: 0.001 pluck · 0.02 normal · 0.1–0.3 pad swell
+RELEASE: 0.05 staccato · 0.15 normal · 0.5–1.0 sustained
+REVERB: 0.15 room · 0.3 hall · 0.6 ambient"#;
 
 // ── Song section planning ─────────────────────────────────────────────────────
 
