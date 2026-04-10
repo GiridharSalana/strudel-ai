@@ -6,11 +6,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashMap;
 use std::time::Duration;
 
 use cli::{Cli, extract_duration_from_prompt, parse_duration_secs};
-use llm::{LlmRequest, build_arrangement, extract_json};
+use llm::{LlmRequest, extract_json};
 use player::{parse_pattern, play_pattern, play_song, save_pattern_json, save_wav_file};
 
 #[tokio::main]
@@ -47,68 +46,71 @@ async fn run() -> Result<()> {
 // ── Song mode ─────────────────────────────────────────────────────────────────
 
 async fn run_song_mode(cli: &Cli, api_key: &str, model: &str, target_secs: u32) -> Result<()> {
-    let total = llm::SONG_SECTIONS.len();
-    let mut sections_json: Vec<(String, String)> = Vec::new();
+    // Plan unique sections — every slot has its own LLM call and audio buffer
+    let plan = llm::plan_song(target_secs, 120.0);
+    let total = plan.len();
 
-    for (i, spec) in llm::SONG_SECTIONS.iter().enumerate() {
+    let mut section_audio: Vec<(String, Vec<f32>)> = Vec::new();
+    let mut established_bpm: Option<f32> = None;
+
+    for (i, spec) in plan.iter().enumerate() {
         let pb = spinner(&format!(
-            "  composing {:<10} {}/{}",
-            spec.name,
-            i + 1,
-            total
+            "  composing {:<12} {}/{}",
+            spec.name, i + 1, total
         ));
 
-        let bpm_line = sections_json
-            .first()
-            .and_then(|(_, j)| serde_json::from_str::<serde_json::Value>(j).ok())
-            .and_then(|v| v.get("bpm").and_then(|b| b.as_u64()))
-            .map(|b| format!("Use exactly BPM: {b}. Do not change the tempo."))
-            .unwrap_or_else(|| "Choose an appropriate BPM for the style (60–160).".into());
+        let bpm_line = established_bpm
+            .map(|b| format!("BPM: {} — FIXED, do not change.", b as u32))
+            .unwrap_or_else(|| "Choose an appropriate BPM for this style (60–160).".into());
 
         let prompt = format!(
-            "Style: {}\nSection: {} ({} bars)\nRole: {}\n{bpm_line}\n\n{}",
-            cli.prompt, spec.name, spec.bars, spec.role, llm::FORMAT_RULES
+            "Style: {}\nSection: {} ({} bars)\nRole: {}\n{}\n\n{}",
+            cli.prompt, spec.name, spec.bars, spec.role, bpm_line, llm::FORMAT_RULES
         );
 
         let raw = call_llm(cli, api_key, model, &prompt).await?;
         let json = extract_json(raw);
 
-        pb.finish_and_clear();
-        print_step_done(spec.name, &format!("{} bars", spec.bars));
+        let pattern = match parse_pattern(&json) {
+            Ok(p) => p,
+            Err(e) => {
+                pb.finish_and_clear();
+                eprintln!("  ⚠  section '{}' failed to parse ({e}), skipping.", spec.name);
+                continue;
+            }
+        };
 
-        sections_json.push((spec.name.to_string(), json));
-    }
+        if established_bpm.is_none() {
+            established_bpm = Some(pattern.bpm);
+        }
 
-    // Parse sections
-    let mut section_map: HashMap<String, player::Pattern> = HashMap::new();
-    let mut bpm = 120.0f32;
-
-    for (name, json) in &sections_json {
-        let pattern = parse_pattern(json)
-            .with_context(|| format!("Failed to parse section '{name}'"))?;
-        if name == "intro" { bpm = pattern.bpm; }
         if cli.print_code {
             let pretty = serde_json::to_string_pretty(
-                &serde_json::from_str::<serde_json::Value>(json).unwrap_or_default()
-            ).unwrap_or_else(|_| json.clone());
-            println!("\n  {} {}\n{}", "▸".dimmed(), name.bold(), pretty.bright_cyan());
+                &serde_json::from_str::<serde_json::Value>(&json).unwrap_or_default(),
+            )
+            .unwrap_or_else(|_| json.clone());
+            println!("\n  {} {}\n{}", "▸".dimmed(), spec.name.bold(), pretty.bright_cyan());
         }
-        section_map.insert(name.clone(), pattern);
+
+        // Render audio immediately while the pattern is fresh
+        let audio = player::render_section(&pattern);
+        pb.finish_and_clear();
+
+        let dur_secs = audio.len() as f32 / player::SAMPLE_RATE as f32;
+        print_step_done(&spec.name, &format!("{} bars · {:.1}s", pattern.bars, dur_secs));
+
+        section_audio.push((spec.name.clone(), audio));
     }
 
-    let arrangement = build_arrangement(bpm, target_secs);
-    let total_secs: f32 = arrangement.iter()
-        .filter_map(|n| section_map.get(n))
-        .map(|p| p.bars as f32 * 4.0 * 60.0 / p.bpm)
+    let total_secs: f32 = section_audio
+        .iter()
+        .map(|(_, a)| a.len() as f32 / player::SAMPLE_RATE as f32)
         .sum();
 
     println!();
     print_divider();
-    println!(
-        "  {}  {}",
-        "arrangement".dimmed(),
-        arrangement.join(" › ").cyan()
-    );
+    let names: Vec<&str> = section_audio.iter().map(|(n, _)| n.as_str()).collect();
+    println!("  {}  {}", "arrangement".dimmed(), names.join(" › ").cyan());
     println!(
         "  {}       {:.0}:{:02.0}",
         "length".dimmed(),
@@ -119,12 +121,15 @@ async fn run_song_mode(cli: &Cli, api_key: &str, model: &str, target_secs: u32) 
     println!();
 
     if let Some(out) = &cli.output {
-        let map: serde_json::Map<String, serde_json::Value> = sections_json
+        let manifest: Vec<serde_json::Value> = section_audio
             .iter()
-            .map(|(k, v)| (k.clone(), serde_json::from_str(v).unwrap_or_default()))
+            .map(|(name, audio)| {
+                let dur = audio.len() as f32 / player::SAMPLE_RATE as f32;
+                serde_json::json!({"section": name, "duration_secs": dur})
+            })
             .collect();
         save_pattern_json(
-            &serde_json::to_string_pretty(&map).unwrap_or_default(),
+            &serde_json::to_string_pretty(&manifest).unwrap_or_default(),
             std::path::Path::new(out),
         )?;
         println!("  {}  {}", "saved".green().bold(), out.underline());
@@ -133,7 +138,7 @@ async fn run_song_mode(cli: &Cli, api_key: &str, model: &str, target_secs: u32) 
 
     if !cli.no_play {
         print_playing();
-        play_song(&section_map, &arrangement, target_secs)?;
+        play_song(&section_audio, target_secs)?;
         println!("  {}", "done.".dimmed());
     }
 
@@ -219,7 +224,6 @@ async fn call_llm(cli: &Cli, api_key: &str, model: &str, prompt: &str) -> Result
 
 fn print_header(cli: &Cli, model: &str, duration_secs: Option<u32>) {
     println!();
-    // Logo bar
     println!(
         "{}{}{}",
         " giribeat ".on_truecolor(99, 102, 241).white().bold(),
@@ -228,7 +232,6 @@ fn print_header(cli: &Cli, model: &str, duration_secs: Option<u32>) {
     );
     println!();
 
-    // Info grid — right-align the labels
     let label = |s: &str| format!("{:>10}", s).truecolor(80, 80, 110).to_string();
 
     println!("  {}  {}", label("prompt"), cli.prompt.white().bold());
@@ -286,7 +289,6 @@ fn resolve_api_key(cli: &Cli) -> Result<String> {
     if let Some(k) = &cli.api_key {
         return Ok(k.clone());
     }
-    // Try provider-specific env var, then generic fallback
     let env_var = cli.provider.env_key_name();
     std::env::var(env_var)
         .or_else(|_| std::env::var("GIRIBEAT_API_KEY"))

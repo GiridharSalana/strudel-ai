@@ -2,12 +2,11 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use fundsp::prelude::*;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-const SAMPLE_RATE: u32 = 44100;
+pub const SAMPLE_RATE: u32 = 44100;
 const LOOP_COUNT: u32 = 8;
 
 #[derive(Deserialize, Debug, Clone)]
@@ -58,6 +57,11 @@ pub fn save_pattern_json(json: &str, path: &Path) -> Result<()> {
         .with_context(|| format!("Failed to write pattern to {}", path.display()))
 }
 
+/// Render a pattern to a mono f32 sample buffer (used by song mode).
+pub fn render_section(pattern: &Pattern) -> Vec<f32> {
+    generate_mono(pattern)
+}
+
 pub fn play_pattern(pattern: &Pattern) -> Result<()> {
     let wav = render_wav(pattern);
     let loop_secs = (pattern.bars as f32 * 4.0 * 60.0) / pattern.bpm;
@@ -84,38 +88,18 @@ pub fn play_pattern(pattern: &Pattern) -> Result<()> {
     Ok(())
 }
 
-/// Play a full multi-section song. Sections are rendered, arranged, crossfaded,
-/// and played as a single continuous audio stream.
-pub fn play_song(
-    sections: &HashMap<String, Pattern>,
-    arrangement: &[String],
-    target_secs: u32,
-) -> Result<()> {
-    // Render each unique section to a mono buffer
-    let mut rendered: HashMap<String, Vec<f32>> = HashMap::new();
-    for (name, pattern) in sections {
-        rendered.insert(name.clone(), generate_mono(pattern));
-    }
-
-    // Concatenate in arrangement order with a short crossfade between sections
-    let xfade = (0.025 * SAMPLE_RATE as f32) as usize; // 25ms crossfade
+/// Play a full multi-section song. Each section is a pre-rendered mono buffer.
+/// Sections are concatenated with short crossfades and played as one stream.
+pub fn play_song(sections: &[(String, Vec<f32>)], _target_secs: u32) -> Result<()> {
+    let xfade = (0.040 * SAMPLE_RATE as f32) as usize; // 40ms crossfade
     let mut timeline: Vec<f32> = Vec::new();
 
-    for section_name in arrangement {
-        let buf = match rendered.get(section_name) {
-            Some(b) => b,
-            None => {
-                eprintln!("Warning: section '{}' not found, skipping", section_name);
-                continue;
-            }
-        };
-
+    for (_, buf) in sections {
         if timeline.is_empty() {
             timeline.extend_from_slice(buf);
         } else {
             let overlap = std::cmp::min(xfade, std::cmp::min(buf.len(), timeline.len()));
             let start   = timeline.len() - overlap;
-            // Blend end of previous section with start of next
             for i in 0..overlap {
                 let t = i as f32 / overlap as f32;
                 timeline[start + i] = timeline[start + i] * (1.0 - t) + buf[i] * t;
@@ -124,10 +108,6 @@ pub fn play_song(
         }
     }
 
-    // Trim to target duration
-    let max_samples = (target_secs as f32 * SAMPLE_RATE as f32) as usize;
-    timeline.truncate(max_samples);
-
     // Final normalize
     let peak = timeline.iter().cloned().fold(0.0f32, |a, b| a.abs().max(b.abs()));
     if peak > 0.85 {
@@ -135,7 +115,6 @@ pub fn play_song(
         timeline.iter_mut().for_each(|s| *s *= scale);
     }
 
-    // Stereo encode
     let stereo: Vec<i16> = timeline
         .iter()
         .flat_map(|&s| {
@@ -151,7 +130,7 @@ pub fn play_song(
         "synthesizing".truecolor(100, 100, 140),
         (actual_secs / 60.0).floor(),
         actual_secs % 60.0,
-        arrangement.len(),
+        sections.len(),
     );
     println!();
 
@@ -425,23 +404,47 @@ macro_rules! render_fundsp {
 }
 
 fn synth_osc(freq: f32, wave: &str, dur_samples: usize, gain: f32) -> Vec<f32> {
-    let attack  = (0.012 * SAMPLE_RATE as f32) as usize;
-    let release = (0.08  * SAMPLE_RATE as f32) as usize;
-
-    let mut samples: Vec<f32> = match wave {
-        "sine"              => render_fundsp!(sine_hz::<f32>(freq), dur_samples, attack, release, gain),
-        "square" | "sq"     => render_fundsp!(square_hz(freq),     dur_samples, attack, release, gain),
-        "sawtooth" | "saw"  => render_fundsp!(saw_hz(freq),        dur_samples, attack, release, gain),
-        "triangle" | "tri"  => render_fundsp!(triangle_hz(freq),   dur_samples, attack, release, gain),
-        _                   => render_fundsp!(sine_hz::<f32>(freq), dur_samples, attack, release, gain),
+    // Adaptive ADSR: longer release for sustained/pad notes
+    let attack  = std::cmp::min((0.020 * SAMPLE_RATE as f32) as usize, dur_samples / 5);
+    let is_pad  = dur_samples > (SAMPLE_RATE as f32 * 0.4) as usize;
+    let release = if is_pad {
+        std::cmp::min((0.30 * SAMPLE_RATE as f32) as usize, dur_samples / 3)
+    } else {
+        std::cmp::min((0.08 * SAMPLE_RATE as f32) as usize, dur_samples / 3)
     };
 
-    // Warm up harsh waveforms with a low-pass filter
-    if matches!(wave, "square" | "sq" | "sawtooth" | "saw") {
-        lowpass(&mut samples, (freq * 5.0).min(8000.0));
+    // Local helper macro to render one oscillator voice
+    macro_rules! voice {
+        ($f:expr, $g:expr) => {
+            match wave {
+                "sine"             => render_fundsp!(sine_hz::<f32>($f), dur_samples, attack, release, $g),
+                "square" | "sq"    => render_fundsp!(square_hz($f),     dur_samples, attack, release, $g),
+                "sawtooth" | "saw" => render_fundsp!(saw_hz($f),        dur_samples, attack, release, $g),
+                "triangle" | "tri" => render_fundsp!(triangle_hz($f),   dur_samples, attack, release, $g),
+                _                  => render_fundsp!(sine_hz::<f32>($f), dur_samples, attack, release, $g),
+            }
+        };
     }
 
-    samples
+    // Voice 1: original pitch
+    let v1 = voice!(freq, gain);
+    // Voice 2: +6 cents detuned, 11 ms delayed — classic 2-osc chorus effect
+    let f2    = freq * 2.0f32.powf(6.0 / 1200.0);
+    let v2    = voice!(f2, gain * 0.55);
+    let delay = (0.011 * SAMPLE_RATE as f32) as usize;
+
+    let mut out = vec![0.0f32; dur_samples];
+    for i in 0..dur_samples {
+        out[i] = v1[i];
+        if i >= delay {
+            out[i] += v2[i - delay];
+        }
+    }
+
+    if matches!(wave, "square" | "sq" | "sawtooth" | "saw") {
+        lowpass(&mut out, (freq * 4.0).min(7000.0));
+    }
+    out
 }
 
 // ── Drums (improved) ──────────────────────────────────────────────────────────

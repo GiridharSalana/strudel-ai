@@ -55,7 +55,7 @@ pub async fn complete(req: &LlmRequest) -> Result<String> {
             },
         ],
         temperature: 0.8,
-        max_completion_tokens: 2048,
+        max_completion_tokens: 4096,
     };
 
     let response = client

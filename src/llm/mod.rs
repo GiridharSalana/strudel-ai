@@ -17,9 +17,10 @@ NOTES: "C2"–"B5" (e.g. "C4", "Eb3", "F#5"). Bass in octaves 2–3, melody in 4
 DRUMS: "kick" (beats 1,3), "snare" (beats 2,4), "hat" (subdivisions), "clap"
 WAVE (melodic only): "sine", "triangle", "square", "sawtooth"
 GAIN: kick=0.85, snare=0.70, hat=0.45, melody=0.50, bass=0.60, pad=0.35
+IMPORTANT: Generate a rich arrangement that fills ALL requested bars with varied events.
 Return ONLY the JSON object."#;
 
-// ── Single-pattern prompt (short loop mode) ───────────────────────────────────
+// ── Single-pattern prompt (loop mode) ────────────────────────────────────────
 
 pub const STRUDEL_SYSTEM_PROMPT: &str = r#"You are a music composer for a CLI audio synthesizer. Generate a musical pattern.
 Create a rich, layered arrangement with bass + melody + drums. 4 bars is a good default.
@@ -41,52 +42,75 @@ DRUMS: "kick", "snare", "hat", "clap"
 WAVE: "sine", "triangle", "square", "sawtooth"
 Return ONLY the JSON object."#;
 
-// ── Section definitions for full-song mode ────────────────────────────────────
+// ── Song section planning ─────────────────────────────────────────────────────
 
-pub struct SectionSpec {
-    pub name: &'static str,
+pub struct SectionPlan {
+    pub name: String,
     pub bars: u32,
-    pub role: &'static str,
+    pub role: String,
 }
 
-pub const SONG_SECTIONS: &[SectionSpec] = &[
-    SectionSpec {
-        name: "intro",
-        bars: 8,
-        role: "INTRO — Sparse and atmospheric. Start with just bass and light percussion. \
-               No melody yet. Build anticipation. Low energy.",
-    },
-    SectionSpec {
-        name: "verse_a",
-        bars: 16,
-        role: "VERSE A — Main melodic theme. Medium energy. Bass + melody + drums. \
-               The core groove of the track.",
-    },
-    SectionSpec {
-        name: "verse_b",
-        bars: 16,
-        role: "VERSE B — Variation of verse A. Use the same BPM and key but change \
-               the melodic phrase or add a counter-melody. Slightly higher energy.",
-    },
-    SectionSpec {
-        name: "chorus",
-        bars: 8,
-        role: "CHORUS — The hook. Full energy. All elements playing together — bass, \
-               melody, drums, pads. This is the emotional peak.",
-    },
-    SectionSpec {
-        name: "bridge",
-        bars: 8,
-        role: "BRIDGE — Contrast. Break from the main progression. Sparse or rhythmically \
-               different. Creates tension before the final chorus.",
-    },
-    SectionSpec {
-        name: "outro",
-        bars: 8,
-        role: "OUTRO — Wind down. Mirror the intro. Remove elements gradually. \
-               End quietly. Same BPM, fading energy.",
-    },
-];
+/// Plans a full song as a sequence of *unique* sections — every slot gets its own
+/// LLM call, so no audio buffer is ever reused. Scales section count and bar length
+/// to approximately fill `target_secs`.
+pub fn plan_song(target_secs: u32, bpm_hint: f32) -> Vec<SectionPlan> {
+    let bar_secs = (60.0 / bpm_hint) * 4.0;
+
+    // Aim for sections of ~28 s each; clamp total section count to 5–12
+    let n = ((target_secs as f32 / 28.0).round() as usize).clamp(5, 12);
+
+    // Bars per section: round to nearest 4-bar phrase, cap at 16 for LLM token budget
+    let raw = (target_secs as f32 / n as f32 / bar_secs).round() as u32;
+    let section_bars = ((raw + 2) / 4 * 4).clamp(4, 16);
+
+    // Section library — ordered for natural song arc; pick first `n` entries
+    let lib: &[(&str, &str)] = &[
+        ("intro",
+         "INTRO — Sparse and atmospheric. Bass and very light hi-hat only. NO melody. \
+          Low energy; slowly build anticipation. Keep the arrangement intentionally empty."),
+        ("verse_1",
+         "VERSE 1 — Full arrangement. Bass groove + lead melody + full drums (kick, snare, hat). \
+          Medium energy. Establish a clear, memorable melodic phrase. \
+          Use a consistent key throughout."),
+        ("build",
+         "BUILD — Rising energy. Layer a counter-melody or arpeggio pad on top of the verse groove. \
+          Add extra percussion hits on off-beats. Tension building toward the drop."),
+        ("chorus_1",
+         "CHORUS 1 — The hook. Maximum energy. Every layer at once: bass, lead melody, pads, \
+          full drums + clap. Bright, uplifting, harmonically rich. Emotional peak."),
+        ("verse_2",
+         "VERSE 2 — Same key and BPM as verse 1, but a COMPLETELY DIFFERENT melodic phrase \
+          and a varied rhythmic pattern. The song progresses; do not repeat verse 1."),
+        ("chorus_2",
+         "CHORUS 2 — Hook returns. Same feel as chorus 1 but add extra percussion hits or \
+          a higher melody line to build more intensity than chorus 1."),
+        ("bridge",
+         "BRIDGE — Contrast and tension. Strip most layers. Change the rhythmic feel, or drop \
+          the kick entirely. Sparse and unexpected — create space before the finale."),
+        ("drop",
+         "DROP — Minimal. Bass-heavy hypnotic groove with almost no melody. Atmospheric pads only. \
+          Stripped-back tension builder before the final rise."),
+        ("chorus_3",
+         "FINAL CHORUS — Biggest moment of the entire track. Maximum intensity: all instruments \
+          at full power. Add extra layers to make it sound huge and triumphant."),
+        ("outro_1",
+         "OUTRO 1 — Begin winding down. Remove the lead melody. Only bass + light drums. \
+          Energy decreasing gradually."),
+        ("outro_2",
+         "OUTRO 2 — Very sparse. Remove drums entirely. Only bass and a soft pad fading away."),
+        ("end",
+         "END — Final resolution. One or two very quiet sustained notes only. Song ending."),
+    ];
+
+    lib[..n]
+        .iter()
+        .map(|(name, role)| SectionPlan {
+            name: name.to_string(),
+            bars: section_bars,
+            role: role.to_string(),
+        })
+        .collect()
+}
 
 // ── Request / response types ──────────────────────────────────────────────────
 
@@ -94,57 +118,6 @@ pub struct LlmRequest {
     pub prompt: String,
     pub model: String,
     pub api_key: String,
-}
-
-// ── Build an arrangement that fills target_secs ───────────────────────────────
-
-/// Returns a Vec of section names in playback order.
-pub fn build_arrangement(bpm: f32, target_secs: u32) -> Vec<String> {
-    let beat_secs = 60.0 / bpm;
-    let bar_secs  = beat_secs * 4.0;
-
-    // How long each section type is (matching SONG_SECTIONS bars)
-    let intro_secs   = 8.0  * bar_secs;
-    let verse_secs   = 16.0 * bar_secs;
-    let chorus_secs  = 8.0  * bar_secs;
-    let bridge_secs  = 8.0  * bar_secs;
-    let outro_secs   = 8.0  * bar_secs;
-
-    // Fixed end: bridge + chorus + outro
-    let end_secs = bridge_secs + chorus_secs + outro_secs;
-
-    let mut arrangement = vec!["intro".to_string()];
-    let mut elapsed = intro_secs;
-    let mut verse_flip = true;
-
-    // Fill the middle with alternating verse A/B + chorus
-    loop {
-        let verse = if verse_flip { "verse_a" } else { "verse_b" };
-        let needed = verse_secs + chorus_secs + end_secs;
-
-        if elapsed + needed > target_secs as f32 {
-            break;
-        }
-
-        arrangement.push(verse.to_string());
-        elapsed += verse_secs;
-        verse_flip = !verse_flip;
-
-        arrangement.push("chorus".to_string());
-        elapsed += chorus_secs;
-    }
-
-    // If we never got a verse+chorus in (very short duration), add at least one
-    if arrangement.len() == 1 {
-        arrangement.push("verse_a".to_string());
-        arrangement.push("chorus".to_string());
-    }
-
-    arrangement.push("bridge".to_string());
-    arrangement.push("chorus".to_string());
-    arrangement.push("outro".to_string());
-
-    arrangement
 }
 
 // ── JSON extraction ───────────────────────────────────────────────────────────
