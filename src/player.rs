@@ -7,7 +7,6 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 pub const SAMPLE_RATE: u32 = 44100;
-const LOOP_COUNT: u32 = 8;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Pattern {
@@ -64,28 +63,20 @@ pub fn render_section(pattern: &Pattern) -> Vec<f32> {
 
 pub fn play_pattern(pattern: &Pattern) -> Result<()> {
     let wav = render_wav(pattern);
-    let loop_secs = (pattern.bars as f32 * 4.0 * 60.0) / pattern.bpm;
+    let duration_secs = (pattern.bars as f32 * 4.0 * 60.0) / pattern.bpm;
 
     println!(
-        "  {:<12}  {} bars · {} BPM · {} events",
+        "  {:<12}  {} bars · {} BPM · {:.1}s · {} events",
         "synthesizing".truecolor(100, 100, 140),
         pattern.bars,
         pattern.bpm as u32,
+        duration_secs,
         pattern.events.len(),
-    );
-    println!(
-        "  {:<12}  {:.1}s × {} loops",
-        "",
-        loop_secs,
-        LOOP_COUNT,
     );
     println!();
 
     let player = detect_player()?;
-    for _ in 0..LOOP_COUNT {
-        play_wav_bytes(&wav, &player)?;
-    }
-    Ok(())
+    play_wav_bytes(&wav, &player)
 }
 
 /// Play a full multi-section song. Each section is a pre-rendered mono buffer.

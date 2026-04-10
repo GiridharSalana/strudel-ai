@@ -22,15 +22,16 @@ Return ONLY the JSON object."#;
 
 // ── Single-pattern prompt (loop mode) ────────────────────────────────────────
 
-pub const STRUDEL_SYSTEM_PROMPT: &str = r#"You are a music composer for a CLI audio synthesizer. Generate a musical pattern.
-Create a rich, layered arrangement with bass + melody + drums. 4 bars is a good default.
+pub const STRUDEL_SYSTEM_PROMPT: &str = r#"You are a music composer for a CLI audio synthesizer. Generate a complete, self-contained musical piece.
+Create a rich, layered arrangement with bass + melody + drums. Use 8–16 bars to give it musical shape.
 
-ARRANGEMENT: kick on beats 1,3 · snare on beats 2,4 · hat subdivisions · bass line · melodic phrases · optional pads
+ARRANGEMENT: kick on beats 1,3 · snare on beats 2,4 · hi-hat subdivisions · bass line · melodic phrases · optional pads.
+The piece should feel complete on a single play — no looping. Let the melody develop and resolve within the bars.
 
 Output a JSON object with this exact schema — no markdown fences, no extra text:
 {
   "bpm": <integer 60-160>,
-  "bars": <integer 2-8>,
+  "bars": <integer 8-16>,
   "events": [
     {"t": <beat float>, "dur": <beat float>, "note": "<pitch or drum>", "wave": "<waveform>", "gain": <0.1-0.9>}
   ]
