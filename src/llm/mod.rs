@@ -1,8 +1,6 @@
 pub mod cerebras;
 pub mod cohere;
 
-use anyhow::Result;
-
 // ── Base JSON format used by every section call ───────────────────────────────
 
 pub const FORMAT_RULES: &str = r#"Output a JSON object with this exact schema — no markdown fences, no extra text:
